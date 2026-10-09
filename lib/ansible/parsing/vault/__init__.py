@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import functools
 import os
 import random
@@ -1038,7 +1037,7 @@ class VaultEditor:
         # check if we have a file descriptor instead of a path
         is_fd = False
         try:
-            is_fd = (isinstance(thefile, int) and fcntl.fcntl(thefile, fcntl.F_GETFD) != -1)
+            is_fd = isinstance(thefile, int) and os.fstat(thefile) is not None
         except Exception:
             pass
 

@@ -32,22 +32,30 @@ else:
 import collections.abc as c
 import codecs
 import ctypes.util
-import fcntl
 import getpass
 import io
 import logging
 import os
 import secrets
+import shutil
 import subprocess
 import sys
-import termios
 import threading
 import time
-import tty
 import typing as t
+import unicodedata
+
+try:
+    import fcntl
+    import termios
+    import tty
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+    termios = None  # type: ignore[assignment]
+    tty = None  # type: ignore[assignment]
 
 from functools import wraps
-from struct import unpack, pack
+from struct import pack, unpack
 
 from ansible import constants as C
 from ansible.constants import config
@@ -67,11 +75,13 @@ if t.TYPE_CHECKING:
     # avoid circular import at runtime
     from ansible.executor.task_queue_manager import FinalQueue
 
-_LIBC = ctypes.cdll.LoadLibrary(ctypes.util.find_library('c'))
-# Set argtypes, to avoid segfault if the wrong type is provided,
-# restype is assumed to be c_int
-_LIBC.wcwidth.argtypes = (ctypes.c_wchar,)
-_LIBC.wcswidth.argtypes = (ctypes.c_wchar_p, ctypes.c_int)
+_LIBC = None
+if libc_path := ctypes.util.find_library('c'):
+    _LIBC = ctypes.cdll.LoadLibrary(libc_path)
+    # Set argtypes, to avoid segfault if the wrong type is provided,
+    # restype is assumed to be c_int
+    _LIBC.wcwidth.argtypes = (ctypes.c_wchar,)
+    _LIBC.wcswidth.argtypes = (ctypes.c_wchar_p, ctypes.c_int)
 # Max for c_int
 _MAX_INT = 2 ** (ctypes.sizeof(ctypes.c_int) * 8 - 1) - 1
 
@@ -120,12 +130,13 @@ def get_text_width(text: str) -> int:
     if not isinstance(text, str):
         raise TypeError('get_text_width requires text, not %s' % type(text))
 
-    try:
-        width = _LIBC.wcswidth(text, _MAX_INT)
-    except ctypes.ArgumentError:
-        width = -1
-    if width != -1:
-        return width
+    if _LIBC is not None:
+        try:
+            width = _LIBC.wcswidth(text, _MAX_INT)
+        except ctypes.ArgumentError:
+            width = -1
+        if width != -1:
+            return width
 
     width = 0
     counter = 0
@@ -141,10 +152,17 @@ def get_text_width(text: str) -> int:
             counter -= 1
             continue
 
-        try:
-            w = _LIBC.wcwidth(c)
-        except ctypes.ArgumentError:
+        if _LIBC is not None:
+            try:
+                w = _LIBC.wcwidth(c)
+            except ctypes.ArgumentError:
+                w = -1
+        elif unicodedata.combining(c):
+            w = 0
+        elif unicodedata.category(c).startswith('C'):
             w = -1
+        else:
+            w = 2 if unicodedata.east_asian_width(c) in ('F', 'W') else 1
         if w == -1:
             # -1 signifies a non-printable character
             # use 0 here as a best effort
@@ -178,7 +196,7 @@ class FilterUserInjector(logging.Filter):
         username = getpass.getuser()
     except OSError:
         # people like to make containers w/o actual valid passwd/shadow and use host uids
-        username = 'uid=%s' % os.getuid()
+        username = 'uid=%s' % getattr(os, 'getuid', lambda: 'unknown')()
 
     def filter(self, record):
         record.user = FilterUserInjector.username
@@ -239,7 +257,8 @@ def _synchronize_textiowrapper(tio: t.TextIO, lock: threading.RLock):
             nonlocal lock
             lock = contextlib.nullcontext()
 
-        os.register_at_fork(after_in_child=disable_lock)
+        if register_at_fork := getattr(os, 'register_at_fork', None):
+            register_at_fork(after_in_child=disable_lock)
 
         @wraps(f)
         def locking_wrapper(*args, **kwargs):
@@ -255,7 +274,7 @@ def _synchronize_textiowrapper(tio: t.TextIO, lock: threading.RLock):
     buffer.flush = _wrap_with_lock(buffer.flush, lock)  # type: ignore[method-assign]
 
 
-def setraw(fd: int, when: int = termios.TCSAFLUSH) -> None:
+def setraw(fd: int, when: int | None = None) -> None:
     """Put terminal into a raw mode.
 
     Copied from ``tty`` from CPython 3.11.0, and modified to not remove OPOST from OFLAG
@@ -265,6 +284,11 @@ def setraw(fd: int, when: int = termios.TCSAFLUSH) -> None:
     over the fork, but before it can be displayed, this plugin will have continued executing, potentially
     setting stdout and stdin to raw which remove output post processing that commonly converts NL to CRLF
     """
+    if termios is None or tty is None:
+        raise AnsiblePromptNoninteractive('raw terminal prompts are not supported on this controller')
+    if when is None:
+        when = termios.TCSAFLUSH
+
     mode = termios.tcgetattr(fd)
     mode[tty.IFLAG] = mode[tty.IFLAG] & ~(termios.BRKINT | termios.ICRNL | termios.INPCK | termios.ISTRIP | termios.IXON)
     mode[tty.OFLAG] = mode[tty.OFLAG] & ~(termios.OPOST)
@@ -282,6 +306,9 @@ def clear_line(stdout: t.BinaryIO) -> None:
 
 
 def setup_prompt(stdin_fd: int, stdout_fd: int, seconds: int, echo: bool) -> None:
+    if termios is None:
+        raise AnsiblePromptNoninteractive('interactive terminal prompts are not supported on this controller')
+
     setraw(stdin_fd)
 
     # Only set stdout to raw mode if it is a TTY. This is needed when redirecting
@@ -975,8 +1002,10 @@ class Display(metaclass=Singleton):
         return result_str
 
     def _set_column_width(self) -> None:
-        if os.isatty(1):
+        if os.isatty(1) and fcntl is not None and termios is not None:
             tty_size = unpack('HHHH', fcntl.ioctl(1, termios.TIOCGWINSZ, pack('HHHH', 0, 0, 0, 0)))[1]
+        elif os.isatty(1):
+            tty_size = shutil.get_terminal_size(fallback=(80, 24)).columns
         else:
             tty_size = 0
         self.columns = max(79, tty_size - 1)
@@ -989,6 +1018,9 @@ class Display(metaclass=Singleton):
         interrupt_input: c.Iterable[bytes] | None = None,
         complete_input: c.Iterable[bytes] | None = None,
     ) -> bytes:
+        if termios is None:
+            raise AnsiblePromptNoninteractive('interactive terminal prompts are not supported on this controller')
+
         if self._final_q:
             from ansible.executor.process.worker import current_worker
             self._final_q.send_prompt(

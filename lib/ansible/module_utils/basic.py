@@ -29,11 +29,8 @@ import __main__
 import atexit
 import dataclasses as _dataclasses
 import errno
-import grp
-import fcntl
 import locale
 import os
-import pwd
 import platform
 import re
 import select
@@ -45,6 +42,15 @@ import subprocess
 import tempfile
 import time
 import traceback
+
+try:
+    import fcntl
+    import grp
+    import pwd
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+    grp = None  # type: ignore[assignment]
+    pwd = None  # type: ignore[assignment]
 
 from . import secrets as _secrets
 

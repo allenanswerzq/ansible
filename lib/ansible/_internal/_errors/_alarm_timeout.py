@@ -45,6 +45,12 @@ class AnsibleTimeoutError(BaseException):
             yield  # execute the context manager's body
             return  # no timeout to deal with, exit immediately
 
+        # Windows has no SIGALRM. Native Windows controllers deliberately run
+        # this legacy timeout context without enforcement.
+        if not hasattr(signal, 'SIGALRM'):
+            yield
+            return
+
         def on_alarm(_signal: int, _frame: types.FrameType) -> None:
             raise cls(timeout)
 

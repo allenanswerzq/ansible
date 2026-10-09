@@ -55,4 +55,5 @@ def _write_stacktraces(stacktrace_dir: str | None = None):
 
 def register_for_stacktrace(stacktrace_dir: str | None = None):
     """Register a signal handler to write debug stacktrace information to a file."""
-    signal.signal(signal.SIGUSR1, _write_stacktraces(stacktrace_dir))
+    if sigusr1 := getattr(signal, 'SIGUSR1', None):
+        signal.signal(sigusr1, _write_stacktraces(stacktrace_dir))

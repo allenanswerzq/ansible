@@ -5,10 +5,14 @@
 from __future__ import annotations
 
 import collections.abc as c
-import fcntl
 import os
 import shlex
 import typing as t
+
+if os.name == 'nt':
+    import msvcrt
+else:
+    import fcntl
 
 from abc import abstractmethod
 from functools import wraps
@@ -227,12 +231,22 @@ class ConnectionBase(AnsiblePlugin):
     def connection_lock(self) -> None:
         f = self._play_context.connection_lockfd
         display.vvvv('CONNECTION: pid %d waiting for lock on %d' % (os.getpid(), f), host=self._play_context.remote_addr)
-        fcntl.lockf(f, fcntl.LOCK_EX)
+        if os.name == 'nt':
+            if os.fstat(f).st_size == 0:
+                os.write(f, b'\0')
+            os.lseek(f, 0, os.SEEK_SET)
+            msvcrt.locking(f, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.lockf(f, fcntl.LOCK_EX)
         display.vvvv('CONNECTION: pid %d acquired lock on %d' % (os.getpid(), f), host=self._play_context.remote_addr)
 
     def connection_unlock(self) -> None:
         f = self._play_context.connection_lockfd
-        fcntl.lockf(f, fcntl.LOCK_UN)
+        if os.name == 'nt':
+            os.lseek(f, 0, os.SEEK_SET)
+            msvcrt.locking(f, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.lockf(f, fcntl.LOCK_UN)
         display.vvvv('CONNECTION: pid %d released lock on %d' % (os.getpid(), f), host=self._play_context.remote_addr)
 
     def reset(self) -> None:

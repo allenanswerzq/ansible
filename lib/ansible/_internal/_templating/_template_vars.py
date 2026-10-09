@@ -1,9 +1,15 @@
 from __future__ import annotations as _annotations
 
 import datetime as _datetime
+import getpass as _getpass
 import os as _os
-import pwd as _pwd
+import platform as _platform
 import time as _time
+
+try:
+    import pwd as _pwd
+except ImportError:
+    _pwd = None
 
 from ansible import constants as _constants
 from ansible.module_utils._internal import _datatag
@@ -28,13 +34,16 @@ def generate_ansible_template_vars(
 
     template_uid: int | str
 
-    try:
-        template_uid = _pwd.getpwuid(template_stat.st_uid).pw_name
-    except KeyError:
-        template_uid = template_stat.st_uid
+    if _pwd is None:
+        template_uid = _getpass.getuser()
+    else:
+        try:
+            template_uid = _pwd.getpwuid(template_stat.st_uid).pw_name
+        except KeyError:
+            template_uid = template_stat.st_uid
 
     temp_vars = dict(
-        template_host=_os.uname()[1],
+        template_host=_platform.node(),
         template_path=path,
         template_mtime=_datetime.datetime.fromtimestamp(template_stat.st_mtime),
         template_uid=template_uid,

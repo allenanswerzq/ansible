@@ -99,8 +99,15 @@ class ActionModule(ActionBase):
             # shlex.split() in order to support paths and files with spaces in the name.
             # Any arguments passed to the script will be added back later.
             raw_params = new_module_args['_raw_params'] or new_module_args['cmd']
-            parts = [to_text(s, errors='surrogate_or_strict') for s in shlex.split(raw_params.strip())]
-            source = parts[0]
+            parts = [
+                to_text(s, errors='surrogate_or_strict')
+                for s in shlex.split(raw_params.strip(), posix=os.name != 'nt')
+            ]
+            source_token = parts[0]
+            source = source_token
+            source_is_quoted = os.name == 'nt' and len(source) >= 2 and source[0] == source[-1] and source[0] in "'\""
+            if source_is_quoted:
+                source = source[1:-1]
 
             # Support executable paths and files with spaces in the name.
             executable = new_module_args['executable']
@@ -136,7 +143,8 @@ class ActionModule(ActionBase):
             # Once everything is encoded consistently, replace the script path on the remote
             # system with the remainder of the raw_params. This preserves quoting in parameters
             # that would have been removed by shlex.split().
-            target_command = to_text(raw_params).strip().replace(parts[0], tmp_src)
+            target_source = f'{source_token[0]}{tmp_src}{source_token[-1]}' if source_is_quoted else tmp_src
+            target_command = to_text(raw_params).strip().replace(source_token, target_source, 1)
 
             self._transfer_file(source, tmp_src)
 

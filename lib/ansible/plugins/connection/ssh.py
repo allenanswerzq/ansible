@@ -421,13 +421,11 @@ import collections.abc as c
 import argparse
 import errno
 import contextlib
-import fcntl
 import hashlib
 import io
 import json
 import os
 import pathlib
-import pty
 import re
 import selectors
 import shlex
@@ -437,6 +435,11 @@ import sys
 import tempfile
 import time
 import typing as t
+
+try:
+    import pty
+except ImportError:
+    pty = None
 from functools import wraps
 from multiprocessing.shared_memory import SharedMemory
 
@@ -1124,7 +1127,7 @@ class Connection(ConnectionBase):
             cmd[:0] = b_ssh_pass_cmd
             popen_kwargs['pass_fds'] = self.sshpass_pipe
 
-        if not in_data:
+        if not in_data and pty is not None:
             try:
                 # Make sure stdin is a proper pty to avoid tcgetattr errors
                 master, slave = pty.openpty()
@@ -1202,7 +1205,7 @@ class Connection(ConnectionBase):
         # timeout usually fails
         timeout = 2 + self.get_option('timeout')
         for fd in (p.stdout, p.stderr):
-            fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
+            os.set_blocking(fd.fileno(), False)
 
         # TODO: bcoca would like to use SelectSelector() when open
         # select is faster when filehandles is low and we only ever handle 1.

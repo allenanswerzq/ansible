@@ -43,7 +43,17 @@ def check_blocking_io():
         except Exception:
             continue  # not a real file handle, such as during the import sanity test
 
-        if not os.get_blocking(fd):
+        try:
+            blocking = os.get_blocking(fd)
+        except OSError:
+            # Windows console handles are not always valid C runtime file
+            # descriptors. They are blocking streams, but querying them can
+            # fail with ERROR_ACCESS_DENIED.
+            if os.name == 'nt':
+                continue
+            raise
+
+        if not blocking:
             handles.append(getattr(handle, 'name', None) or '#%s' % fd)
 
     if handles:
@@ -66,12 +76,12 @@ def initialize_locale():
             'ERROR: Ansible could not initialize the preferred locale: %s' % e
         )
 
-    if not encoding or encoding.lower() not in ('utf-8', 'utf8'):
-        raise SystemExit('ERROR: Ansible requires the locale encoding to be UTF-8; Detected %s.' % encoding)
-
     fs_enc = sys.getfilesystemencoding()
     if fs_enc.lower() != 'utf-8':
         raise SystemExit('ERROR: Ansible requires the filesystem encoding to be UTF-8; Detected %s.' % fs_enc)
+
+    if (not encoding or encoding.lower() not in ('utf-8', 'utf8')) and os.name != 'nt':
+        raise SystemExit('ERROR: Ansible requires the locale encoding to be UTF-8; Detected %s.' % encoding)
 
 
 initialize_locale()

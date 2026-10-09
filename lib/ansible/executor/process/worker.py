@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import copy
 import errno
 import io
 import os
@@ -109,7 +110,8 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin
         signal.signal(signum, signal.SIG_DFL)
 
         try:
-            os.killpg(self.pid, signum)
+            if killpg := getattr(os, 'killpg', None):
+                killpg(self.pid, signum)
             os.kill(self.pid, signum)
         except OSError as e:
             if e.errno != errno.ESRCH:
@@ -157,14 +159,15 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin
         with stdio fds.
         """
         try:
-            if C.config.get_config_value('WORKER_SESSION_ISOLATION', variables=self._task_vars):
-                os.setsid()  # create a new session and process group for this worker (fully isolated from parent session resources, e.g., inherited TTY)
-            else:
-                os.setpgid(0, 0)  # isolation disabled, just make this worker a new process group leader for granular child process tracking
+            if os.name != 'nt':
+                if C.config.get_config_value('WORKER_SESSION_ISOLATION', variables=self._task_vars):
+                    os.setsid()  # create a new session and process group for this worker (fully isolated from parent session resources, e.g., inherited TTY)
+                else:
+                    os.setpgid(0, 0)  # isolation disabled, just make this worker a new process group leader for granular child process tracking
 
             # Create new fds for stdin/stdout/stderr, but also capture python uses of sys.stdout/stderr
             for fds, mode in (
-                    ((STDIN_FILENO,), os.O_RDWR | os.O_NONBLOCK),
+                    ((STDIN_FILENO,), os.O_RDWR | getattr(os, 'O_NONBLOCK', 0)),
                     ((STDOUT_FILENO, STDERR_FILENO), os.O_WRONLY),
             ):
                 stdio = os.open(os.devnull, mode)
@@ -194,6 +197,13 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin
         """
         # Set the queue on Display so calls to Display.display are proxied over the queue
         display.set_queue(self._final_q)
+
+        # A spawned Windows worker does not inherit the collection import hook
+        # installed in the controller process. Forked POSIX workers do.
+        if os.name == 'nt':
+            from ansible.plugins.loader import init_plugin_loader
+            init_plugin_loader()
+
         self._detach()
 
         # No need to create the stacktrace directory since TQM does that for us.
@@ -238,7 +248,12 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin
         self._host.groups = []
 
         for name, stdio in (('stdout', sys.stdout), ('stderr', sys.stderr)):
-            if data := stdio.getvalue():  # type: ignore[union-attr]
+            if getvalue := getattr(stdio, 'getvalue', None):
+                data = getvalue()
+            else:
+                data = ''
+
+            if data:
                 display.warning(
                     (
                         f'WorkerProcess for [{self._host}/{self._task}] errantly sent data directly to {name} instead of using Display:\n'
@@ -268,3 +283,58 @@ class WorkerProcess(multiprocessing_context.Process):  # type: ignore[name-defin
                 # ignore the real task result and don't allow result object contribution from the exception (in case the pickling error was related)
                 # also use a synthesized host and task object to avoid issues with values from them, particularly task_fields
                 self._final_q.send_task_result(host, task, utr)
+
+
+class InlineWorkerProcess(WorkerProcess):
+    """Run one task synchronously for controllers without POSIX fork."""
+
+    def __init__(self, **kwargs: t.Any) -> None:
+        # A POSIX worker receives isolated copies of these objects through fork.
+        # Recreate that boundary so task execution cannot mutate controller state.
+        loader = copy.copy(kwargs['loader'])
+        loader._tempfiles = set()
+        kwargs['loader'] = loader
+
+        host = copy.copy(kwargs['host'])
+        host.vars = dict(host.vars)
+        host.groups = list(host.groups)
+        kwargs['host'] = host
+        kwargs['task'] = kwargs['task'].copy()
+
+        super().__init__(**kwargs)
+        self._inline_alive = False
+        self._inline_exitcode: int | None = None
+
+    def start(self) -> None:
+        global current_worker
+
+        previous_worker = current_worker
+        self._inline_alive = True
+        try:
+            with _task.TaskContext.create(task=self._task, task_vars=self._task_vars, host_name=self._host.name):
+                self._run()
+        except BaseException:
+            self._inline_exitcode = 1
+            raise
+        else:
+            self._inline_exitcode = 0
+        finally:
+            current_worker = previous_worker
+            self._inline_alive = False
+
+    def is_alive(self) -> bool:
+        return self._inline_alive
+
+    @property
+    def exitcode(self) -> int | None:
+        return self._inline_exitcode
+
+    @property
+    def pid(self) -> int:
+        return os.getpid()
+
+    def close(self) -> None:
+        self.worker_queue.close()
+
+    def terminate(self) -> None:
+        self._inline_alive = False

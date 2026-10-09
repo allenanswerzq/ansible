@@ -38,12 +38,17 @@ DOCUMENTATION = """
 import functools
 import getpass
 import os
-import pty
 import selectors
+import shlex
 import shutil
 import subprocess
 import time
 import typing as t
+
+try:
+    import pty
+except ImportError:
+    pty = None
 
 import ansible.constants as C
 from ansible.errors import AnsibleError, AnsibleFileNotFound, AnsibleConnectionFailure
@@ -60,6 +65,8 @@ class Connection(ConnectionBase):
 
     transport = 'local'
     has_pipelining = True
+    _shell_type = 'powershell' if os.name == 'nt' else 'sh'
+    allow_executable = os.name != 'nt'
 
     def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
 
@@ -68,7 +75,8 @@ class Connection(ConnectionBase):
         try:
             self.default_user = getpass.getuser()
         except OSError:
-            display.vv("Current user (uid=%s) does not seem to exist on this system, leaving user empty." % os.getuid())
+            uid = getattr(os, 'getuid', lambda: 'unknown')()
+            display.vv("Current user (uid=%s) does not seem to exist on this system, leaving user empty." % uid)
             self.default_user = ""
 
     def _connect(self) -> Connection:
@@ -90,9 +98,9 @@ class Connection(ConnectionBase):
 
         display.debug("in local.exec_command()")
 
-        executable = C.DEFAULT_EXECUTABLE.split()[0] if C.DEFAULT_EXECUTABLE else None
+        executable = None if os.name == 'nt' else (C.DEFAULT_EXECUTABLE.split()[0] if C.DEFAULT_EXECUTABLE else None)
 
-        if not os.path.exists(to_bytes(executable, errors='surrogate_or_strict')):
+        if executable and not os.path.exists(to_bytes(executable, errors='surrogate_or_strict')):
             raise AnsibleError("failed to find the executable specified %s."
                                " Please verify if the executable exists and re-try." % executable)
 
@@ -111,14 +119,18 @@ class Connection(ConnectionBase):
             # Falls back to using a standard pipe if this fails, which may
             # cause the command to fail in certain situations where we are escalating
             # privileges or the command otherwise needs a pty.
-            try:
-                pty_primary, stdin = pty.openpty()
-            except OSError as ex:
-                display.debug(f"Unable to open pty: {ex}")
+            if pty is not None:
+                try:
+                    pty_primary, stdin = pty.openpty()
+                except OSError as ex:
+                    display.debug(f"Unable to open pty: {ex}")
+
+        popen_cmd = shlex.split(cmd) if os.name == 'nt' and isinstance(cmd, str) else cmd
+        use_shell = os.name != 'nt' and isinstance(cmd, (str, bytes))
 
         p = subprocess.Popen(
-            cmd,
-            shell=isinstance(cmd, (str, bytes)),
+            popen_cmd,
+            shell=use_shell,
             executable=executable,
             cwd=self.cwd,
             stdin=stdin,

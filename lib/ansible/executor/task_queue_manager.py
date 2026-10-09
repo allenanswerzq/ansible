@@ -247,6 +247,8 @@ class TaskQueueManager:
 
     def _initialize_processes(self, num: int) -> None:
         # mutable update to ensure the reference stays the same
+        if os.name == 'nt':
+            num = 1
         self._workers[:] = [None] * num
 
     def _signal_handler(self, signum, frame) -> None:
@@ -262,7 +264,7 @@ class TaskQueueManager:
         for worker in self._workers:
             if worker is None or not worker.is_alive():
                 continue
-            if worker.pid:
+            if worker.pid and worker.pid != os.getpid():
                 try:
                     # notify workers
                     os.kill(worker.pid, signum)

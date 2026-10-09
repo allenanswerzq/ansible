@@ -34,7 +34,7 @@ from ansible import constants as C, constants
 from ansible import context
 from ansible.errors import AnsibleError, AnsibleTemplateError
 from ansible.executor.play_iterator import IteratingStates, PlayIterator
-from ansible.executor.process.worker import WorkerProcess
+from ansible.executor.process.worker import InlineWorkerProcess, WorkerProcess
 from ansible._internal._task import WireTaskResult, HostTaskResult
 from ansible.executor.task_queue_manager import CallbackSend, DisplaySend, PromptSend, TaskQueueManager
 from ansible.module_utils.common.text.converters import to_text
@@ -395,7 +395,8 @@ class StrategyBase:
                     }
 
                     # Pass WorkerProcess its strategy worker number so it can send an identifier along with intra-task requests
-                    worker_prc = WorkerProcess(
+                    worker_type = InlineWorkerProcess if os.name == 'nt' else WorkerProcess
+                    worker_prc = worker_type(
                         final_q=self._final_q,
                         task_vars=task_vars,
                         host=host,

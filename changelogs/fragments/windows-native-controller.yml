@@ -1,0 +1,2 @@
+minor_changes:
+  - ansible-playbook - add experimental native Windows controller support for serial local execution with PowerShell.

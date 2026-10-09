@@ -115,7 +115,8 @@ def ensure_type(value: object, value_type: str | None, origin: str | None = None
     * none: Return `None`. Accepts only the string "None".
     * path: Return a resolved path. Accepts `str`.
     * temppath/tmppath/tmp: Return a unique temporary directory inside the resolved path specified by the value.
-    * pathspec: Return a `list` of resolved paths. Accepts a `list` or `Sequence`. Also accepts `str`, splitting on ':'.
+    * pathspec: Return a `list` of resolved paths. Accepts a `list` or `Sequence`.
+      Also accepts `str`, splitting on the controller's path separator, except built-in defaults which use ':'.
     * pathlist: Return a `list` of resolved paths. Accepts a `list` or `Sequence`. Also accepts `str`, splitting on `,` while stripping whitespace from paths.
     * dictionary/dict: Return a `dict`. Accepts `dict` or `Mapping`.
     * string/str: Return a `str`. Accepts `bool`, `int`, `float`, `complex` or `str`.
@@ -214,7 +215,25 @@ def _ensure_type(value: object, value_type: str | None, origin: str | None = Non
 
         case 'pathspec':
             if isinstance(value, str):
-                value = value.split(os.pathsep)
+                if origin == 'default' and os.name == 'nt':
+                    parts: list[str] = []
+                    part_start = 0
+                    for index, character in enumerate(value):
+                        is_drive_separator = (
+                            character == ':'
+                            and index == part_start + 1
+                            and value[part_start].isalpha()
+                            and index + 1 < len(value)
+                            and value[index + 1] in ('/', '\\')
+                        )
+                        if character == ':' and not is_drive_separator:
+                            parts.append(value[part_start:index])
+                            part_start = index + 1
+                    parts.append(value[part_start:])
+                    value = [part for part in parts if not part.startswith('/')]
+                else:
+                    separator = ':' if origin == 'default' else os.pathsep
+                    value = value.split(separator)
 
             if isinstance(value, Sequence) and not isinstance(value, bytes) and all(isinstance(x, str) for x in value):
                 return [resolve_path(x, basedir=basedir) for x in value]
